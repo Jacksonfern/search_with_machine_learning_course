@@ -17,9 +17,9 @@ parser = argparse.ArgumentParser(description='Process some integers.')
 general = parser.add_argument_group("general")
 general.add_argument("--input", default=directory,  help="The directory containing product data")
 general.add_argument("--output", default="/workspace/datasets/fasttext/output.fasttext", help="the file to output to")
-general.add_argument("--label", default="id", help="id is default and needed for downsteam use, but name is helpful for debugging")
+general.add_argument("--label", default="id", choices=['id', 'name'], help="id is default and needed for downsteam use, but name is helpful for debugging")
 
-# IMPLEMENT: Setting min_products removes infrequent categories and makes the classifier's task easier.
+# Setting min_products removes infrequent categories and makes the classifier's task easier.
 general.add_argument("--min_products", default=0, type=int, help="The minimum number of products per category (default is 0).")
 
 args = parser.parse_args()
@@ -31,7 +31,6 @@ if os.path.isdir(output_dir) == False:
 
 if args.input:
     directory = args.input
-# IMPLEMENT: Track the number of items in each category and only output if above the min
 min_products = args.min_products
 names_as_labels = False
 if args.label == 'name':
@@ -58,12 +57,29 @@ def _label_filename(filename):
               labels.append((cat, transform_name(name)))
     return labels
 
+def filter_min_products(all_labels, min_freq):
+    cats_count = {}
+    for label_list in all_labels:
+        for (cat, _) in label_list:
+            if cat in cats_count:
+                cats_count[cat] += 1
+            else:
+                cats_count[cat] = 1
+    
+    filtered_labels = []
+    for label_list in all_labels:
+        for label_item in label_list:
+            if cats_count[label_item[0]] > min_freq:
+                filtered_labels.append(label_item)
+
+    return filtered_labels
+
 if __name__ == '__main__':
     files = glob.glob(f'{directory}/*.xml')
     print("Writing results to %s" % output_file)
     with multiprocessing.Pool() as p:
         all_labels = tqdm(p.imap(_label_filename, files), total=len(files))
+        filtered_labels = filter_min_products(list(all_labels), min_products)
         with open(output_file, 'w') as output:
-            for label_list in all_labels:
-                for (cat, name) in label_list:
-                    output.write(f'__label__{cat} {name}\n')
+            for (cat, name) in filtered_labels:
+                output.write(f'__label__{cat} {name}\n')
