@@ -11,11 +11,22 @@ from urllib.parse import urljoin
 import pandas as pd
 import logging
 import sys
+import fasttext
+import re
 
+from nltk.stem import PorterStemmer
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logging.basicConfig(format='%(levelname)s:%(message)s')
+
+fasttext_model = "/workspace/datasets/fasttext/model.bin"
+
+def normalize_query(query: str, stemmer: PorterStemmer):
+    normalized_query = re.sub(r'[^A-Za-z0-9]', ' ', query.strip().lower())
+    normalized_query = re.sub(r'\s+', ' ', normalized_query)
+    normalized_query = ' '.join([ stemmer.stem(token) for token in normalized_query.split(' ') ])
+    return normalized_query
 
 # expects clicks and impressions to be in the row
 def create_prior_queries_from_group(
@@ -186,12 +197,22 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
     return query_obj
 
 
-def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", name_search_field="name"):
+def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", name_search_field="name", filter_categories=None):
     #### W3: classify the query
     #### W3: create filters and boosts
     # Note: you may also want to modify the `create_query` method above
-    query_obj = create_query(user_query, click_prior_query=None, filters=None, sort=sort, sortDir=sortDir, source=["name", "shortDescription"], name_search_field=name_search_field)
-    logging.info(query_obj)
+    filters = None
+    if filter_categories is not None and len(filter_categories) > 0:
+        filters = [
+            {
+                "terms": {
+                    "categoryPathIds.keyword": filter_categories
+                }
+            }
+        ]
+
+    query_obj = create_query(user_query, click_prior_query=None, filters=filters, sort=sort, sortDir=sortDir, source=["name", "shortDescription"], name_search_field=name_search_field)
+    logger.info(json.dumps(query_obj, indent=2))
     response = client.search(query_obj, index=index)
     if response and response['hits']['hits'] and len(response['hits']['hits']) > 0:
         hits = response['hits']['hits']
@@ -214,6 +235,10 @@ if __name__ == "__main__":
                          help='The OpenSearch admin.  If this is set, the program will prompt for password too. If not set, use default of admin/admin')
     general.add_argument('--synonyms',
                          action='store_true', help='Use synonym analyzer in queries')
+    general.add_argument('--model',
+                         default=fasttext_model, help='Path to fasttext model')
+    general.add_argument('--threshold', type=float, default=0.8, help='Threshold for filtering categories')
+    general.add_argument('--enable_filters', action='store_true', help='Enable category filters on the query')
 
     args = parser.parse_args()
 
@@ -242,13 +267,36 @@ if __name__ == "__main__":
     )
     index_name = args.index
     name_search_field = "name.synonym" if args.synonyms else "name"
+    fasttext_model = fasttext.load_model(args.model)
+    threshold = args.threshold
+
+    stemmer = PorterStemmer()
+
     query_prompt = "\nEnter your query (type 'Exit' to exit or hit ctrl-c):"
     print(query_prompt)
     for line in sys.stdin:
         query = line.rstrip()
         if query == "Exit":
             break
-        search(client=opensearch, user_query=query, index=index_name, name_search_field=name_search_field)
+        query = normalize_query(query, stemmer)
+        predicted_categories, scores = fasttext_model.predict(query, 5)
+        print(predicted_categories, scores)
+
+        categories = None
+        if args.enable_filters:
+            sum_scores = 0
+            categories = []
+            for i in range(len(scores)):
+                sum_scores += scores[i]
+                categories.append(predicted_categories[i].removeprefix('__label__'))
+                if sum_scores >= threshold:
+                    break
+        
+            if sum_scores < threshold or not args.enable_filters:
+                categories = None
+
+        print(f"Filtering by categories {categories}")
+        search(client=opensearch, user_query=query, index=index_name, name_search_field=name_search_field, filter_categories=categories)
 
         print(query_prompt)
 
