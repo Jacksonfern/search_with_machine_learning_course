@@ -13,6 +13,7 @@ import logging
 import sys
 import fasttext
 import re
+from sentence_transformers import SentenceTransformer
 
 from nltk.stem import PorterStemmer
 
@@ -21,6 +22,7 @@ logger.setLevel(logging.INFO)
 logging.basicConfig(format='%(levelname)s:%(message)s')
 
 fasttext_model = "/workspace/datasets/fasttext/model.bin"
+model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
 def normalize_query(query: str, stemmer: PorterStemmer):
     normalized_query = re.sub(r'[^A-Za-z0-9]', ' ', query.strip().lower())
@@ -196,22 +198,44 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
         query_obj["_source"] = source
     return query_obj
 
+def create_vector_query(query_vector: list[float], size = 10, source: list[str] = None):
+    query_obj = {
+        "size": size,
+        "query": {
+            "knn": {
+                "name_embedding": {
+                    "vector": query_vector,
+                    "k": size
+                }
+            }
+        }
+    }
 
-def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", name_search_field="name", filter_categories=None):
+    if source is not None:
+        query_obj["_source"] = source
+
+    return query_obj
+
+def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", name_search_field="name", filter_categories=None, is_vector_search=False, query_vector = None):
     #### W3: classify the query
     #### W3: create filters and boosts
     # Note: you may also want to modify the `create_query` method above
-    filters = None
-    if filter_categories is not None and len(filter_categories) > 0:
-        filters = [
-            {
-                "terms": {
-                    "categoryPathIds.keyword": filter_categories
+    response = None
+    if is_vector_search:
+        query_obj = create_vector_query(query_vector.tolist(), source=["name", "shortDescription"])
+    else:
+        filters = None
+        if filter_categories is not None and len(filter_categories) > 0:
+            filters = [
+                {
+                    "terms": {
+                        "categoryPathIds.keyword": filter_categories
+                    }
                 }
-            }
-        ]
+            ]
 
-    query_obj = create_query(user_query, click_prior_query=None, filters=filters, sort=sort, sortDir=sortDir, source=["name", "shortDescription"], name_search_field=name_search_field)
+        query_obj = create_query(user_query, click_prior_query=None, filters=filters, sort=sort, sortDir=sortDir, source=["name", "shortDescription"], name_search_field=name_search_field)
+   
     logger.info(json.dumps(query_obj, indent=2))
     response = client.search(query_obj, index=index)
     if response and response['hits']['hits'] and len(response['hits']['hits']) > 0:
@@ -239,6 +263,7 @@ if __name__ == "__main__":
                          default=fasttext_model, help='Path to fasttext model')
     general.add_argument('--threshold', type=float, default=0.8, help='Threshold for filtering categories')
     general.add_argument('--enable_filters', action='store_true', help='Enable category filters on the query')
+    general.add_argument('--vector', action='store_true', help='Use vector search')
 
     args = parser.parse_args()
 
@@ -269,34 +294,53 @@ if __name__ == "__main__":
     name_search_field = "name.synonym" if args.synonyms else "name"
     fasttext_model = fasttext.load_model(args.model)
     threshold = args.threshold
+    is_vector_search = args.vector
 
     stemmer = PorterStemmer()
 
+    if is_vector_search:
+        logger.info("Vector search mode")
+    else:
+        logger.info("Default search mode")
     query_prompt = "\nEnter your query (type 'Exit' to exit or hit ctrl-c):"
     print(query_prompt)
     for line in sys.stdin:
         query = line.rstrip()
         if query == "Exit":
             break
-        query = normalize_query(query, stemmer)
-        predicted_categories, scores = fasttext_model.predict(query, 5)
-        print(predicted_categories, scores)
 
+        query_vector = None
         categories = None
-        if args.enable_filters:
-            sum_scores = 0
-            categories = []
-            for i in range(len(scores)):
-                sum_scores += scores[i]
-                categories.append(predicted_categories[i].removeprefix('__label__'))
-                if sum_scores >= threshold:
-                    break
-        
-            if sum_scores < threshold or not args.enable_filters:
-                categories = None
+        if is_vector_search:
+            query_vector = model.encode(query)
+        else:
+            query = normalize_query(query, stemmer)
+            predicted_categories, scores = fasttext_model.predict(query, 5)
+            print(predicted_categories, scores)
 
-        print(f"Filtering by categories {categories}")
-        search(client=opensearch, user_query=query, index=index_name, name_search_field=name_search_field, filter_categories=categories)
+            if args.enable_filters:
+                sum_scores = 0
+                categories = []
+                for i in range(len(scores)):
+                    sum_scores += scores[i]
+                    categories.append(predicted_categories[i].removeprefix('__label__'))
+                    if sum_scores >= threshold:
+                        break
+            
+                if sum_scores < threshold or not args.enable_filters:
+                    categories = None
+
+            print(f"Filtering by categories {categories}")
+
+        search(
+            client=opensearch, 
+            user_query=query, 
+            index=index_name, 
+            name_search_field=name_search_field, 
+            filter_categories=categories,
+            is_vector_search=is_vector_search,
+            query_vector=query_vector
+        )
 
         print(query_prompt)
 
