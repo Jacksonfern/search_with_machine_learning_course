@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import numpy as np
 import csv
+import re
 
 # Useful if you want to perform stemming.
 import nltk
@@ -16,14 +17,12 @@ output_file_name = r'/workspace/datasets/fasttext/labeled_queries.txt'
 
 parser = argparse.ArgumentParser(description='Process arguments.')
 general = parser.add_argument_group("general")
-general.add_argument("--min_queries", default=1,  help="The minimum number of queries per category label (default is 1)")
+general.add_argument("--min_queries", type=int, default=1,  help="The minimum number of queries per category label (default is 1)")
 general.add_argument("--output", default=output_file_name, help="the file to output to")
 
 args = parser.parse_args()
 output_file_name = args.output
-
-if args.min_queries:
-    min_queries = int(args.min_queries)
+min_queries = args.min_queries
 
 # The root category, named Best Buy with id cat00000, doesn't have a parent.
 root_category_id = 'cat00000'
@@ -48,9 +47,28 @@ parents_df = pd.DataFrame(list(zip(categories, parents)), columns =['category', 
 queries_df = pd.read_csv(queries_file_name)[['category', 'query']]
 queries_df = queries_df[queries_df['category'].isin(categories)]
 
-# IMPLEMENT ME: Convert queries to lowercase, and optionally implement other normalization, like stemming.
+def normalize_query(query: str):
+    normalized_query = re.sub(r'[^A-Za-z0-9]', ' ', query.strip().lower())
+    normalized_query = re.sub(r'\s+', ' ', normalized_query)
+    normalized_query = ' '.join([ stemmer.stem(token) for token in normalized_query.split(' ') ])
+    return normalized_query
 
-# IMPLEMENT ME: Roll up categories to ancestors to satisfy the minimum number of queries per category.
+queries_df['query'] = queries_df['query'].apply(normalize_query)
+
+# roll up low frequent categories to its ancestor
+get_parent_cat = lambda cat: parents_df[parents_df['category'] == cat].iloc[0]['parent']
+while True:
+    count_cats = queries_df.groupby(by=['category']).count()['query']
+    low_freq_cats = count_cats[count_cats < min_queries].index
+    # all categories exceed threshold
+    if low_freq_cats.shape[0] == 0:
+        break
+    low_cat_queries = queries_df[(queries_df['category'].isin(low_freq_cats)) & (queries_df['category'] != root_category_id)]
+    queries_df.loc[low_cat_queries.index, 'category'] = low_cat_queries['category'].apply(get_parent_cat)
+
+# for queries which its category is the root, we fill it up with "unknown"
+root_cat_queries = queries_df[queries_df['category'] == root_category_id]
+queries_df.loc[root_cat_queries.index, 'category'] = ['unknown'] * root_cat_queries.shape[0]
 
 # Create labels in fastText format.
 queries_df['label'] = '__label__' + queries_df['category']
