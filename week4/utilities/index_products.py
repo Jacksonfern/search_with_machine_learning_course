@@ -154,7 +154,7 @@ def index_file(file, index_name, reduced=False):
         embeddings = model.encode(names)
         assert len(docs) == len(embeddings)
         for i in range(len(docs)):
-            docs[i]['_source']['name_embedding'] = embeddings[i]
+            docs[i]['_source']['name_embedding'] = embeddings[i].tolist()
         bulk(client, docs, request_timeout=60)
         logger.info(f'{docs_indexed} documents indexed')
     return docs_indexed
